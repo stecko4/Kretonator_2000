@@ -2,6 +2,13 @@
 #define FIRMWARE_DATE	"27.01.2025"
 #include <Arduino.h>
 
+
+// Biblioteki potrzebne do przejścia w stan uspienia
+#include <coredecls.h>         // crc32()
+#include <PolledTimeout.h>
+//#include <include/WiFiState.h> // WiFiState structure details
+
+
 //Biblioteki potrzebne dla AutoConnect
 #include <ESP8266WiFi.h>                // Replace 'ESP8266WiFi.h' with 'WiFi.h. for ESP32
 #include <ESP8266WebServer.h>					  // Replace 'ESP8266WebServer.h'with 'WebServer.h' for ESP32
@@ -23,10 +30,11 @@ SimpleTimer Timer;
 #include <RGBLed.h>
 
 //ZMIENNE GLOBALNE
-boolean		ReadyToFire			= false;	// TRUE jeśli jest rotary switch poziom 1 / FALSE jeśli jest rotary switch poziom 2
-boolean		MoleInPlace			= false;	// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
-boolean		DeadMole			= false;	// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
-boolean		IgniterReady		= false;	// TRUE jeśli zapalnik jest sprawny (pomiar przewodności) / FALSE jeśli zapalnik jest przerwany (uszkodzony lub po odpaleniu petardy)
+boolean		 ReadyToFire		= false;	// TRUE jeśli jest rotary switch poziom 1 / FALSE jeśli jest rotary switch poziom 2
+boolean		 MoleInPlace		= false;	// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
+boolean		 DeadMole			= false;	// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
+boolean		 IgniterReady		= false;	// TRUE jeśli zapalnik jest sprawny (pomiar przewodności) / FALSE jeśli zapalnik jest przerwany (uszkodzony lub po odpaleniu petardy)
+volatile int timerID			= -1;		//Przetrzymuje ID Timera
 
 //STAŁE
 
@@ -42,7 +50,20 @@ RGBLed led(R_LED, G_LED, B_LED, RGBLed::COMMON_CATHODE);  // Deklaracja diody RG
 //---------------------------------------------------------------------------------------------------------------------------------------------
 
 // put function declarations here:
-void GatherInformation();
+void GatherInformation();				// Definicja funkcji zbierającej onformacje o KRETONATORZE 2000
+void BatterySaveMode_Modemsleep();		// Przejście w stan uśpienia (Forced Modem-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
+void BatterySaveMode_Lightsleep();		// Przejście w stan uśpienia (Forced Light-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
+
+
+
+void wakeupCallback() {  // unlike ISRs, you can do a print() from a callback function
+#ifdef testPoint
+  digitalWrite(testPoint, LOW);  // testPoint tracks latency from WAKE_UP_PIN LOW to testPoint LOW
+#endif
+  Serial.print(F("millis() = ")); // show that RTC / millis() is stopped in Forced Light Sleep
+  Serial.println(millis());  // although the CPU may run for up to 1000 mS before fully stopping
+  Serial.println(F("Woke from Forced Light Sleep - this is the callback"));
+}
 
 void setup() {
 
@@ -52,6 +73,7 @@ void setup() {
   Serial.begin(115200);
 	Serial.println("Serial port initiated");
 	// Autoconnect
+	/*
 	Config.hostName 		= "Kretonator_2000";			// Sets host name to SotAp identification
 	//Config.apid 			= "Lazienka_ESP22 ";			// SoftAP's SSID.
 	//Config.psk 				= "12345678";				// Sets password for SoftAP. The length should be from 8 to up to 63.
@@ -66,9 +88,9 @@ void setup() {
 	{	
 		Serial.println("WiFi connected: " + WiFi.localIP().toString());
 	}
-
+	*/
 	
-	pinMode(MoleDetectionPin, INPUT);					          // Deklaracja pinu z kontaktronem
+	pinMode(MoleDetectionPin, INPUT);					      // Deklaracja pinu z kontaktronem
 	pinMode(IgnitionLevel_1, INPUT);					      // Deklaracja pinu bezpiecznego uzbrajania
 	pinMode(IgnitionLevel_2, INPUT);					      // Deklaracja pinu stanu uzbrojonego, oczekiwanie na kreta i inicjalizacja eksplozji
 	pinMode(R_LED, INPUT);					                  // Deklaracja pinu z kolorem czerwonym diody RGB
@@ -76,15 +98,31 @@ void setup() {
 	pinMode(B_LED, INPUT);					                  // Deklaracja pinu z kolorem niebieskim diody RGB
 	pinMode(RELAY_01, OUTPUT);				                  // Deklaracja pinu z przekaźnikiem wyzwalającym eksplozję petardy
 	
+	pinMode(D4, OUTPUT);					                  // Deklaracja pinu z wbudowaną diodą
 	digitalWrite(RELAY_01,LOW);								  // Wyłącza przekaźnik z petardą
+
+	// call function f once after d milliseconds
+    timerID = Timer.setTimeout(3000, BatterySaveMode_Lightsleep);	  // Przejdzie w stan uśpienia za 3min czyli 180sec
 
 }
 
 void loop()
 {	
-
 	Timer.run();
-	Portal.handleClient();
+	/*
+	if ( Timer.isEnabled(timerID) )		// Portal Auto connect będzie aktywny tylko jeśli ESP nie przejdzie w stan uśpienia co nastąpi po 3min od uruchomienia
+	{
+			Portal.handleClient();
+	}
+	*/
+	digitalWrite(D4,HIGH);		// zapala diodę
+	//Serial.println("Zapala diodę.");
+	delay(200); 			    // Czeka 200ms
+	//Serial.println("Gasi diodę");
+	digitalWrite(D4,LOW);		// Gazi diodę
+	delay(200); 			    // Czeka 200ms
+
+
 	GatherInformation();			
 
 	if ( DeadMole == true)
@@ -133,4 +171,25 @@ void GatherInformation() {
 	{
 		MoleInPlace = false;
 	}
+}
+
+
+// REF: https://github.com/esp8266/Arduino/issues/6642
+
+// Przejście w stan uśpienia (Forced Modem-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
+void BatterySaveMode_Modemsleep()
+{
+  WiFi.forceSleepBegin();  // alternate method of Forced Modem Sleep without saving WiFi state
+  delay(10);  // it doesn't always go to sleep unless you delay(10); yield() wasn't reliable
+  Serial.println("Forced Modem-sleep");
+}
+
+// Przejście w stan uśpienia (Forced Light-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
+void BatterySaveMode_Lightsleep()
+{
+  WiFi.mode(WIFI_OFF);  // you must turn the modem off; using disconnect won't work
+  delay(10);
+  wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
+  // gpio_pin_wakeup_enable(GPIO_ID_PIN(MoleDetectionPin), GPIO_PIN_INTR_LOLEVEL);
+  Serial.println("Forced Light-sleep");
 }
