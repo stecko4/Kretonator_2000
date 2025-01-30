@@ -15,6 +15,7 @@
 #include <AutoConnect.h>
 ESP8266WebServer			Server;				    // Replace 'ESP8266WebServer' with 'WebServer' for ESP32
 AutoConnect			Portal(Server);
+Config.immediateStart = true;      // Disable the 1st-WiFi.begin and start the captive portal. If this option is enabled, the module will be in AP_STA mode and the captive portal.
 //AutoConnectConfig	Config;       		  // Enable autoReconnect supported on v0.9.4
 AutoConnectConfig 	Config("Lazienka_ESP32", "12345678");
 String viewCredential(PageArgument&);
