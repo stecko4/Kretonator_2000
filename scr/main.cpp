@@ -1,3 +1,6 @@
+#define FIRMWARE_VERSION "v0.1.0"
+#define FIRMWARE_DATE "07.03.2025"
+
 #include <Arduino.h>
 
 // Biblioteki potrzebne do przejścia w stan uspienia
@@ -36,6 +39,7 @@ SimpleTimer Timer;
 
 
 //ZMIENNE GLOBALNE
+boolean		 	TriggerError		= false;		// TRUE jeśli jest rotary switch poziom 2 oraz MoleInPlace	= true. Dodatkowe zabezpieczenie przed wybuchem jeśli przy przełączeniu na poziom 2 powinno wypalić. 
 boolean		 	ReadyToFire			= false;		// TRUE jeśli jest rotary switch poziom 1 / FALSE jeśli jest rotary switch poziom 2
 boolean		 	MoleInPlace			= false;		// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
 boolean		 	ExplosionConfirmed	= false;		// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
@@ -71,6 +75,8 @@ static const crgb_t L_GREEN = 0x00ff00;
 static const crgb_t L_BLUE = 0x0000ff;
 static const crgb_t L_WHITE = 0xe0e0e0;
 static const crgb_t L_YELLOW = 0xFFFF00;
+static const rgb_t L_PURPLE = { .r = 255, .g = 0, .b = 255 };
+static const rgb_t L_LBlue = { .r = 0, .g = 204, .b = 255 };
 
 LiteLED myLED( LED_TYPE, LED_TYPE_IS_RGBW );    // create the LiteLED object; we're calling it "myLED"
 //##########################################################################################################
@@ -94,15 +100,11 @@ unsigned long secondsToMilliseconds(float seconds) {
 
 // Zmienia surowy odczyt poziomu baterii na wejściu analogowym na procent naładowania baterii
 unsigned long BatteryLevelToPercent(unsigned long BatLev) {
-    if (BatLev < 2230)
-	{
-		BatLev = 2230;
-	}
-	else if (BatLev > 3462)
-	{
-		BatLev = 3462;
-	}
-	return 	map(BatLev, 2230, 3462, 0, 100); 
+
+	BatLev = constrain(BatLev, 2347, 3352);				// Constrains a number to be within a range.
+	return 	map(BatLev, 2347, 3352, 0, 100);	// Re-maps a number from one range to another.
+	// 3V = 0% (Analog read --> 2347)
+	// 4.09V = 100% (Analog read --> 3352)
 }
 
 void wakeupCallback() {  // unlike ISRs, you can do a print() from a callback function
@@ -114,13 +116,15 @@ void wakeupCallback() {  // unlike ISRs, you can do a print() from a callback fu
   Serial.println(F("Woke from Forced Light Sleep - this is the callback"));
 }
 
+// If the load current drops below 45mA during 32 seconds, the IP5306 will go into standby mode
+// Funkkcja podtrzymująca napięcie, at least once within the 32 seconds within a loop. REF: https://tutorials.techrad.co.za/2024/01/22/ip5306-mh-cd42-heartbeat/
 void TriggerCD42() {
 	digitalWrite(CD42ActivateTrigger,HIGH);							  // Stan wysoki aby nie zanikało napięcie
-	digitalWrite(22,LOW);
-	delay(TriggerTime);
+	digitalWrite(22,LOW);											  // zapalenie wbudowanej diody LED
+	delay(TriggerTime);												  // Zwiera do masy na określony w 'TriggerTime' czas
 	digitalWrite(CD42ActivateTrigger,LOW);							  // Stan wysoki aby nie zanikało napięcie
-	digitalWrite(22,HIGH);
-	Serial.println("Trigger activated ");
+	digitalWrite(22,HIGH);											  // Zgaszenie wbudowanej diody LED
+	//Serial.println("Trigger activated ");
   }
 
 void onOTAStart() {
@@ -171,18 +175,23 @@ void setup() {
 
 
 	pinMode(MoleDetectionPin, INPUT_PULLUP);				  // Deklaracja pinu z kontaktronem
-	//pinMode(LED_GPIO, OUTPUT);					              // Pin na którym jest adresowalna dioda RGB 
+	//pinMode(LED_GPIO, OUTPUT);					          // Pin na którym jest adresowalna dioda RGB 
 
 	pinMode(RELAY_01, OUTPUT);				                  // Deklaracja pinu z przekaźnikiem wyzwalającym eksplozję petardy
 	pinMode(CD42ActivateTrigger, OUTPUT);				      // Deklaracja pinu na którym co 20s wystawiany jest stan LOW aby CD42 nie przechodził w stan uśpienia 
 	digitalWrite(CD42ActivateTrigger,LOW);
 
 	pinMode(22, OUTPUT);					          		  // Deklaracja pinu z wbudowaną diodą
-	digitalWrite(RELAY_01,LOW);							  // Wyłącza przekaźnik z petardą
+	digitalWrite(RELAY_01,LOW);							  	  // Wyłącza przekaźnik z petardą
 	digitalWrite(22,HIGH);							  		  // Wyłącza zintegrowaną diodę LED
 
     myLED.begin( LED_GPIO, 1 );         // initialze the myLED object. Here we have 1 LED attached to the LED_GPIO pin
     myLED.brightness( LED_BRIGHT );     // set the LED photon intensity level
+
+
+	myLED.setPixel( 0, L_LBlue, 1 );    // set the LED colour and show it	
+	myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
+	delay(500);
 
 
 	//digitalWrite(22, HIGH);		// Zapala diodę
@@ -191,7 +200,6 @@ void setup() {
 
 	// call function f once after d milliseconds
     //timerID = Timer.setTimeout(secondsToMilliseconds(30), BatterySaveMode_Modemsleep);	  // Przejdzie w stan uśpienia za 3min czyli 180sec
-	//BatterySaveMode_Lightsleep();
 	//Timer.setInterval(secondsToMilliseconds(3), PrintData);
 	Timer.setInterval(secondsToMilliseconds(25), TriggerCD42);
 
@@ -235,31 +243,41 @@ void loop(){
 		ElegantOTA.loop();
 	}
 
-	if ( DeadMole == true)
+	if ( TriggerError == true)
+	{
+		// Zapala żółtą diodę. Na poziomie 2 czyli UZBROJONY oznacza to błąd i blokadę detonacji
+		myLED.setPixel( 0, L_PURPLE, 1 );    // set the LED colour and show it	
+		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
+	}
+	else if ( DeadMole == true)
 	{
 		// Zapala niebieską diodę na znak żałoby po kreciku
-		myLED.setPixel( 0, L_BLUE, 1 );    // set the LED colour and show it	
+		myLED.setPixel( 0, L_BLUE, 1 );    // set the LED colour and show it
+		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on	
 	}
 	else if ( MoleInPlace == false &&  ReadyToFire == true )
 	{
 		// Zapala czerwoną diodę (Uzbrojone i gotowe do detonacji)
 		myLED.setPixel( 0, L_RED, 1 );    // set the LED colour and show it
+		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
 	}
 	else if ( MoleInPlace == false &&  ReadyToFire == false )
 	{
 		// Zapala zieloną diodę (Prawidłowo uzbrojone)
 		myLED.setPixel( 0, L_GREEN, 1 );    // set the LED colour and show it
+		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
 	}
 	else if ( MoleInPlace == true &&  ReadyToFire == false )
 	{
 		// Zapala żółtą diodę (Popraw wyzwalacz magnetyczny)
 		myLED.setPixel( 0, L_YELLOW, 1 );    // set the LED colour and show it
+		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
 	}
-	else if ( MoleInPlace == true &&  ReadyToFire == true )
+	else if ( MoleInPlace == true &&  ReadyToFire == true && TriggerError == false )
 	{	
-		//myLED.setPixel( 0, L_BLUE, 1 );    		// set the LED colour and show it
+		//myLED.setPixel( 0, L_BLUE, 1 );    	// set the LED colour and show it
 		digitalWrite(RELAY_01,HIGH);			// Odpala petardę
-		delay(secondsToMilliseconds(0.2)); 		// Czeka 0.2s, tyle trwa ikkrzenie zapalnika
+		delay(secondsToMilliseconds(0.2)); 		// Czeka 0.2s, tyle trwa iskrzenie zapalnika
 		digitalWrite(RELAY_01,LOW);				// Wyłącza przekaźnik z petardą
 		DeadMole = true;						// Zmienia status kreta na "MARTWY"
 	}
@@ -270,15 +288,18 @@ void loop(){
 // Definicja funkcji zbierającej onformacje o KRETONATORZE 2000
 void GatherInformation() {
 
-	if ( analogRead(IgniterVoltage) < 2230 && BatterySaveMode == false)	// Sprawdza czy na zapalniku jest napięcie aby sprawdzić pozycję Rotary Switch oraz stan zapalnika
+	if ( analogRead(IgniterVoltage) < 2230 )	// Sprawdza czy na zapalniku jest napięcie aby sprawdzić pozycję Rotary Switch oraz stan zapalnika
 	{	
 		ReadyToFire = false;
-		BatterySaveMode = false;
+		//BatterySaveMode = false;
+		//myLED.setPixel( 0, L_PURPLE, 1 );    // set the LED colour and show it	
+		//myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
+		delay(500);
 	}
 	else
 	{
 		ReadyToFire = true;
-		if ( BatterySaveMode == false )	// Czy ESP jest już w stanie oszczędzania energii
+		if ( BatterySaveMode == false && TriggerError == false )	// Czy ESP jest już w stanie oszczędzania energii
 		{	
 			BatteryIndicator();
 		}
@@ -317,17 +338,6 @@ void BatterySaveMode_Modemsleep()
 	Serial.println("");
 }
 
-// Przejście w stan uśpienia (Forced Light-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
-void BatterySaveMode_Lightsleep()
-{
-  //WiFi.mode(WIFI_OFF);  // you must turn the modem off; using disconnect won't work
-  //delay(10);
-  //wifi_fpm_set_sleep_type(LIGHT_SLEEP_T);
-  // gpio_pin_wakeup_enable(GPIO_ID_PIN(MoleDetectionPin), GPIO_PIN_INTR_LOLEVEL);
-  Serial.println("Forced Light-sleep");
-	esp_light_sleep_start();
-}
-
 void PrintData()
 {
 	
@@ -364,6 +374,11 @@ void PrintData()
 }
 
 void BatteryIndicator(){
+	// Przełączono na poziom 2 (UZBROJONY) sprawdza czy nie powinien wypalić petardy. W tym momencie digitalRead(MoleDetectionPin) powinno być równe LOW
+	if ( digitalRead(MoleDetectionPin) == HIGH )
+	{
+		TriggerError = true;
+	}
 
 	BatteryLevel = 0;
 	for(int j=0; j<5; j++) {
@@ -386,7 +401,7 @@ void BatteryIndicator(){
 		{	
 			WebSerial.print(F("i = "));
 			WebSerial.println(i);
-			myLED.setPixel( 0, L_GREEN, 1 );    			// set the LED colour and show it
+			myLED.setPixel( 0, L_GREEN, 1 );    		// set the LED colour and show it
 			myLED.brightness( LED_BRIGHT, 1 );  		// turn the LED on
 			delay( secondsToMilliseconds(0.8) ); 		// Czeka 0.8s
 			myLED.brightness( 0, 1 );           		// turn the LED off
@@ -397,7 +412,7 @@ void BatteryIndicator(){
 		{
 			WebSerial.print(F("i = "));
 			WebSerial.println(i);
-			myLED.setPixel( 0, L_YELLOW, 1 );    			// set the LED colour and show it
+			myLED.setPixel( 0, L_YELLOW, 1 );    		// set the LED colour and show it
 			myLED.brightness( LED_BRIGHT, 1 );  		// turn the LED on
 			delay( secondsToMilliseconds(0.8) ); 		// Czeka 0.8s
 			myLED.brightness( 0, 1 );           		// turn the LED off
@@ -407,9 +422,19 @@ void BatteryIndicator(){
 	}
 
 	delay( secondsToMilliseconds(1.3) ); 				// Czeka 1.3s
-	myLED.setPixel( 0, L_RED, 1 );    					// set the LED colour and show it
-	myLED.brightness( LED_BRIGHT, 1 );  				// turn the LED on
 
 	BatterySaveMode_Modemsleep();
 	BatterySaveMode = true;
+
+	// Przełączono na poziom 2 (UZBROJONY) i wskazaniu poziomu baterii sprawdza po raz kolejny czy nie powinien wypalić petardy. W tym momencie digitalRead(MoleDetectionPin) powinno być równe LOW
+	if ( digitalRead(MoleDetectionPin) == HIGH )
+	{
+		TriggerError = true;
+	}
+
+	if ( TriggerError == false )
+	{
+		myLED.setPixel( 0, L_RED, 1 );    					// set the LED colour and show it
+		myLED.brightness( LED_BRIGHT, 1 );  				// turn the LED on
+	}
 }
