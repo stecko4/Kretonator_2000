@@ -1,5 +1,5 @@
-#define FIRMWARE_VERSION "v0.1.0"
-#define FIRMWARE_DATE "07.03.2025"
+#define FIRMWARE_VERSION "v0.1.1"
+#define FIRMWARE_DATE "10.03.2025"
 
 #include <Arduino.h>
 
@@ -46,9 +46,10 @@ boolean		 	ExplosionConfirmed	= false;		// TRUE jeśli kret został wykryty / FA
 boolean		 	DeadMole			= false;		// TRUE jeśli kret został wykryty / FALSE kret jest poza polem rażenia
 boolean		 	IgniterReady		= false;		// TRUE jeśli zapalnik jest sprawny (pomiar przewodności) / FALSE jeśli zapalnik jest przerwany (uszkodzony lub po odpaleniu petardy)
 boolean		 	BatterySaveMode		= false;		// TRUE jeśli ESP32 jest w trybie oszczędzania baterii, potrzebne do tego aby nie wywoływaćAutoConnect
-unsigned long	BatteryLevel		= 0;			// Surowy odczyt poziomu baterii na wejściu analogowym
-unsigned long	BatteryPercent		= 0;			// Procent naładowania baterii
-volatile int 	timerID				= -1;			//Przetrzymuje ID Timera
+unsigned long	BatteryVoltageRaw	= 0;			// Surowy odczyt poziomu baterii na wejściu analogowym
+double			BatteryVoltage		= 0;			// Napięcie zmieżone na baterii [V]
+double			BatteryCapacity		= 0;			// Procent naładowania baterii [%]
+volatile int 	timerID				= -1;			// Przetrzymuje ID Timera
 
 //STAŁE
 #define CD42ActivateTrigger	  19				// (GPIO19) Pin na którym co 20s wystawiany jest stan LOW aby CD42 nie przechodził w stan uśpienia 
@@ -67,7 +68,7 @@ volatile int 	timerID				= -1;			//Przetrzymuje ID Timera
 #define LED_TYPE        LED_STRIP_WS2812
 #define LED_TYPE_IS_RGBW 0   // if the LED is an RGBW type, change the 0 to 1
 #define LED_BRIGHT 40   // sets how bright the LED is. O is off; 255 is burn your eyeballs out (not recommended)
-#define TriggerTime 50	// Ustawia czas zwarcia do masy dla zasilania dla wybudzenia 
+#define TriggerTime 1200	// Ustawia czas zwarcia do masy dla zasilania dla wybudzenia 
 
 // pick the colour you want from the list here and change it in setup()
 static const crgb_t L_RED = 0xff0000;
@@ -91,18 +92,25 @@ void GatherInformation();				// Definicja funkcji zbierającej onformacje o KRET
 void BatterySaveMode_Modemsleep();		// Przejście w stan uśpienia (Forced Modem-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
 void BatterySaveMode_Lightsleep();		// Przejście w stan uśpienia (Forced Light-sleep) REF: https://www.espressif.com/sites/default/files/9b-esp8266-low_power_solutions_en_0.pdf
 void PrintData();
-void BatteryIndicator();
+void BatteryIndicator();				// Fynkcja pokazująca stan naładowania baterii poprzez mrugnięcia diody
+double Voltage2Capacity(double x);		// Funkcja zwraca pojemność baterii w % na podstawie odczytu napięcia
 
 // Zmienia sekundy na milisekundy
 unsigned long secondsToMilliseconds(float seconds) {
     return seconds * 1000;
 }
 
-// Zmienia surowy odczyt poziomu baterii na wejściu analogowym na procent naładowania baterii
-unsigned long BatteryLevelToPercent(unsigned long BatLev) {
+//Działa jak map() ale zwraca liczby rzeczywiste a nie tylko całkowite
+double mapf(double val, double in_min, double in_max, double out_min, double out_max)
+{
+    return (val - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
-	BatLev = constrain(BatLev, 2347, 3352);				// Constrains a number to be within a range.
-	return 	map(BatLev, 2347, 3352, 0, 100);	// Re-maps a number from one range to another.
+// Zmienia surowy odczyt poziomu baterii na wejściu analogowym na procent naładowania baterii
+double analogRead2BatteryVoltage(unsigned long BatLev) {
+
+	//BatLev = constrain(BatLev, 2347, 3352);				// Constrains a number to be within a range.
+	return 	mapf(BatLev, 2347, 3352, 3.0, 4.09);	// Re-maps a number from one range to another.
 	// 3V = 0% (Analog read --> 2347)
 	// 4.09V = 100% (Analog read --> 3352)
 }
@@ -119,10 +127,10 @@ void wakeupCallback() {  // unlike ISRs, you can do a print() from a callback fu
 // If the load current drops below 45mA during 32 seconds, the IP5306 will go into standby mode
 // Funkkcja podtrzymująca napięcie, at least once within the 32 seconds within a loop. REF: https://tutorials.techrad.co.za/2024/01/22/ip5306-mh-cd42-heartbeat/
 void TriggerCD42() {
-	digitalWrite(CD42ActivateTrigger,HIGH);							  // Stan wysoki aby nie zanikało napięcie
+	digitalWrite(CD42ActivateTrigger,LOW);							  // Stan wysoki aby nie zanikało napięcie
 	digitalWrite(22,LOW);											  // zapalenie wbudowanej diody LED
 	delay(TriggerTime);												  // Zwiera do masy na określony w 'TriggerTime' czas
-	digitalWrite(CD42ActivateTrigger,LOW);							  // Stan wysoki aby nie zanikało napięcie
+	digitalWrite(CD42ActivateTrigger,HIGH);							  // Stan wysoki aby nie zanikało napięcie
 	digitalWrite(22,HIGH);											  // Zgaszenie wbudowanej diody LED
 	//Serial.println("Trigger activated ");
   }
@@ -179,7 +187,7 @@ void setup() {
 
 	pinMode(RELAY_01, OUTPUT);				                  // Deklaracja pinu z przekaźnikiem wyzwalającym eksplozję petardy
 	pinMode(CD42ActivateTrigger, OUTPUT);				      // Deklaracja pinu na którym co 20s wystawiany jest stan LOW aby CD42 nie przechodził w stan uśpienia 
-	digitalWrite(CD42ActivateTrigger,LOW);
+	digitalWrite(CD42ActivateTrigger,HIGH);
 
 	pinMode(22, OUTPUT);					          		  // Deklaracja pinu z wbudowaną diodą
 	digitalWrite(RELAY_01,LOW);							  	  // Wyłącza przekaźnik z petardą
@@ -251,14 +259,14 @@ void loop(){
 	}
 	else if ( DeadMole == true)
 	{
-		// Zapala niebieską diodę na znak żałoby po kreciku
-		myLED.setPixel( 0, L_BLUE, 1 );    // set the LED colour and show it
+		// Zapala czerwoną diodę na znak żałoby po kreciku
+		myLED.setPixel( 0, L_RED, 1 );    // set the LED colour and show it
 		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on	
 	}
 	else if ( MoleInPlace == false &&  ReadyToFire == true )
 	{
-		// Zapala czerwoną diodę (Uzbrojone i gotowe do detonacji)
-		myLED.setPixel( 0, L_RED, 1 );    // set the LED colour and show it
+		// Zapala niebieską diodę (Uzbrojone i gotowe do detonacji)
+		myLED.setPixel( 0, L_BLUE, 1 );    // set the LED colour and show it
 		myLED.brightness( LED_BRIGHT, 1 );   // turn the LED on
 	}
 	else if ( MoleInPlace == false &&  ReadyToFire == false )
@@ -341,17 +349,20 @@ void BatterySaveMode_Modemsleep()
 void PrintData()
 {
 	
-	BatteryLevel = analogRead(IgniterVoltage);
-	WebSerial.print("BatteryLevel");
-	WebSerial.print(BatteryLevel);
-	BatteryPercent = BatteryLevelToPercent(BatteryLevel);
-	WebSerial.print("BatteryPercent");
-	WebSerial.print(BatteryPercent);
+	BatteryVoltageRaw = analogRead(IgniterVoltage);
+	WebSerial.print("BatteryVoltageRaw =");
+	WebSerial.print(BatteryVoltageRaw);
+	BatteryVoltage = analogRead2BatteryVoltage(BatteryVoltageRaw);
+	WebSerial.print("BatteryVoltage =");
+	WebSerial.print(BatteryVoltage);
+	BatteryCapacity = Voltage2Capacity(BatteryVoltage);
+	WebSerial.print("BatteryCapacity =");
+	WebSerial.print(BatteryCapacity);
 /*
 	Serial.print("Battery, Analog Read = ");
-	Serial.println(BatteryLevel);
+	Serial.println(BatteryVoltageRaw);
 	WebSerial.print("Battery, Analog Read = ");
-	WebSerial.print(BatteryLevel);
+	WebSerial.print(BatteryVoltageRaw);
 
 	Serial.print("ReadyToFire = ");
 	Serial.println(ReadyToFire);
@@ -373,6 +384,7 @@ void PrintData()
 	*/
 }
 
+// Fynkcja pokazująca stan naładowania baterii poprzez mrugnięcia diody
 void BatteryIndicator(){
 	// Przełączono na poziom 2 (UZBROJONY) sprawdza czy nie powinien wypalić petardy. W tym momencie digitalRead(MoleDetectionPin) powinno być równe LOW
 	if ( digitalRead(MoleDetectionPin) == HIGH )
@@ -380,24 +392,27 @@ void BatteryIndicator(){
 		TriggerError = true;
 	}
 
-	BatteryLevel = 0;
+	BatteryVoltageRaw = 0;
 	for(int j=0; j<5; j++) {
 		delay( secondsToMilliseconds(0.05) ); 		// Czeka 0.8s
-    	BatteryLevel = BatteryLevel + analogRead(IgniterVoltage);
+    	BatteryVoltageRaw = BatteryVoltageRaw + analogRead(IgniterVoltage);
     }
-	BatteryLevel = BatteryLevel / 5; 	//Uśrednianie wartości 
-	WebSerial.print(F("BatteryLevel :"));
-	WebSerial.println(BatteryLevel);
-	BatteryPercent = BatteryLevelToPercent(BatteryLevel);
-	WebSerial.print(F("BatteryPercent: "));
-	WebSerial.println(BatteryPercent);
+	BatteryVoltageRaw = BatteryVoltageRaw / 5; 	//Uśrednianie wartości 
+	WebSerial.print("BatteryVoltageRaw =");
+	WebSerial.print(BatteryVoltageRaw);
+	BatteryVoltage = analogRead2BatteryVoltage(BatteryVoltageRaw);
+	WebSerial.print("BatteryVoltage =");
+	WebSerial.print(BatteryVoltage);
+	BatteryCapacity = Voltage2Capacity(BatteryVoltage);
+	WebSerial.print("BatteryCapacity =");
+	WebSerial.print(BatteryCapacity);
 
-	myLED.brightness( 0, 1 );           	// Gasi diodę na początku na 1s aby można było rozrużnić od poprawnego uzbrojenia
+	myLED.brightness( 0, 1 );           		// Gasi diodę na początku na 1s aby można było rozrużnić od poprawnego uzbrojenia
 	delay( secondsToMilliseconds(1.0) ); 		// Czeka 1s
 
 	for ( int i = 10; i <= 100; i = i + 10 )
 	{
-		if ( BatteryPercent > i - 5 )	// Poziom naładowania baterii > 20%, pierwsze mignięcie - zielona diona 
+		if ( BatteryCapacity > i - 5 )	// Poziom naładowania baterii > 20%, pierwsze mignięcie - zielona diona 
 		{	
 			WebSerial.print(F("i = "));
 			WebSerial.println(i);
@@ -437,4 +452,15 @@ void BatteryIndicator(){
 		myLED.setPixel( 0, L_RED, 1 );    					// set the LED colour and show it
 		myLED.brightness( LED_BRIGHT, 1 );  				// turn the LED on
 	}
+}
+
+// Funkcja zwraca pojemność baterii w % na podstawie odczytu napięcia
+double Voltage2Capacity(double x) {
+
+    return -(3.4965e-8) * pow(x, 4) +
+            (0.0000104118) * pow(x, 3) -
+            (0.00105012) * pow(x, 2) +
+            (0.0525019) * x +
+            2.51958;
+
 }
